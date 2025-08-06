@@ -1,62 +1,124 @@
 #include "ADCAudio.h"
 #include <stdio.h>
 
+enum { ADC_BUF_LEN = 1024 }; 
+
+// DMAC descriptor structure
+typedef struct {
+  uint16_t btctrl;
+  uint16_t btcnt;
+  uint32_t srcaddr;
+  uint32_t dstaddr;
+  uint32_t descaddr;
+} dmacdescriptor;
+
+// Globals - DMA and ADC
+volatile uint8_t count=1;
+
+uint16_t adc_buf_0[ADC_BUF_LEN];    // ADC results array 0
+uint16_t adc_buf_1[ADC_BUF_LEN];    // ADC results array 1
+volatile dmacdescriptor wrb[DMAC_CH_NUM] __attribute__ ((aligned (16)));          // Write-back DMAC descriptors
+dmacdescriptor descriptor_section[DMAC_CH_NUM] __attribute__ ((aligned (16)));    // DMAC channel descriptors
+dmacdescriptor descriptor __attribute__ ((aligned (16)));                         // Place holder descriptor
+
+bool volatile data_ready=false;
+
+void DMAC_1_Handler() {
+
+ 
+  static uint16_t idx = 0;
+ 
+  // Check if DMAC channel 1 has been suspended (SUSP)
+  if (DMAC->Channel[1].CHINTFLAG.bit.SUSP) {
+
+    // Restart DMAC on channel 1 and clear SUSP interrupt flag
+    DMAC->Channel[1].CHCTRLB.reg = DMAC_CHCTRLB_CMD_RESUME;
+    DMAC->Channel[1].CHINTFLAG.bit.SUSP = 1;
+    
+    data_ready=true;
+    count = (count + 1) % 2;
+  }
+}
+
 ADCAudio ::ADCAudio()
 {
 }
 
 void ADCAudio::end() 
 {
-    // Configure DMA for ADC transfers
-    dma_channel_unclaim(adc_dma);
+  
 }
 
-void ADCAudio::begin(const uint8_t audio_pin, const uint32_t audio_sample_rate) 
+void ADCAudio::begin() 
 {
+   
+  // Configure DMA to sample from ADC at a regular interval (triggered by timer/counter)
+  DMAC->BASEADDR.reg = (uint32_t)descriptor_section;                          // Specify the location of the descriptors
+  DMAC->WRBADDR.reg = (uint32_t)wrb;                                          // Specify the location of the write back descriptors
+  DMAC->CTRL.reg = DMAC_CTRL_DMAENABLE | DMAC_CTRL_LVLEN(0xf);                // Enable the DMAC peripheral
+  DMAC->Channel[1].CHCTRLA.reg = DMAC_CHCTRLA_TRIGSRC(TC5_DMAC_ID_OVF) |      // Set DMAC to trigger on TC5 timer overflow
+                                 DMAC_CHCTRLA_TRIGACT_BURST;                  // DMAC burst transfer
+  descriptor.descaddr = (uint32_t)&descriptor_section[1];                     // Set up a circular descriptor
+  descriptor.srcaddr = (uint32_t)&ADC1->RESULT.reg;                           // Take the result from the ADC0 RESULT register
+  descriptor.dstaddr = (uint32_t)adc_buf_0 + sizeof(uint16_t) * ADC_BUF_LEN;  // Place it in the adc_buf_0 array
+  descriptor.btcnt = ADC_BUF_LEN;                                             // Beat count
+  descriptor.btctrl = DMAC_BTCTRL_BEATSIZE_HWORD |                            // Beat size is HWORD (16-bits)
+                      DMAC_BTCTRL_DSTINC |                                    // Increment the destination address
+                      DMAC_BTCTRL_VALID |                                     // Descriptor is valid
+                      DMAC_BTCTRL_BLOCKACT_SUSPEND;                           // Suspend DMAC channel 0 after block transfer
+  memcpy(&descriptor_section[0], &descriptor, sizeof(descriptor));            // Copy the descriptor to the descriptor section
+  descriptor.descaddr = (uint32_t)&descriptor_section[0];                     // Set up a circular descriptor
+  descriptor.srcaddr = (uint32_t)&ADC1->RESULT.reg;                           // Take the result from the ADC0 RESULT register
+  descriptor.dstaddr = (uint32_t)adc_buf_1 + sizeof(uint16_t) * ADC_BUF_LEN;  // Place it in the adc_buf_1 array
+  descriptor.btcnt = ADC_BUF_LEN;                                             // Beat count
+  descriptor.btctrl = DMAC_BTCTRL_BEATSIZE_HWORD |                            // Beat size is HWORD (16-bits)
+                      DMAC_BTCTRL_DSTINC |                                    // Increment the destination address
+                      DMAC_BTCTRL_VALID |                                     // Descriptor is valid
+                      DMAC_BTCTRL_BLOCKACT_SUSPEND;                           // Suspend DMAC channel 0 after block transfer
+  memcpy(&descriptor_section[1], &descriptor, sizeof(descriptor));            // Copy the descriptor to the descriptor section
 
-  // ADC Configuration
-  adc_init();
-  adc_gpio_init(audio_pin); // I channel (0) - configure pin for ADC use
-  const uint32_t usb_clock_frequency = 48000000;
-  adc_set_clkdiv((usb_clock_frequency / audio_sample_rate) - 1);
+  // Configure NVIC
+  NVIC_SetPriority(DMAC_1_IRQn, 0);    // Set the Nested Vector Interrupt Controller (NVIC) priority for DMAC1 to 0 (highest)
+  NVIC_EnableIRQ(DMAC_1_IRQn);         // Connect DMAC1 to Nested Vector Interrupt Controller (NVIC)
 
-  // Configure DMA for ADC transfers
-  adc_dma = dma_claim_unused_channel(true);
-  cfg = dma_channel_get_default_config(adc_dma);
+  // Activate the suspend (SUSP) interrupt on DMAC channel 1
+  DMAC->Channel[1].CHINTENSET.reg = DMAC_CHINTENSET_SUSP;
+  
+  // Configure ADC
+  ADC1->INPUTCTRL.bit.MUXPOS = ADC_INPUTCTRL_MUXPOS_AIN12_Val; // Set the analog input to ADC0/AIN2 (PB08 - A4 on Metro M4)
+  while(ADC1->SYNCBUSY.bit.INPUTCTRL);                // Wait for synchronization
+  ADC1->SAMPCTRL.bit.SAMPLEN = 0x00;                  // Set max Sampling Time Length to half divided ADC clock pulse (2.66us)
+  while(ADC1->SYNCBUSY.bit.SAMPCTRL);                 // Wait for synchronization 
+  ADC1->CTRLA.reg = ADC_CTRLA_PRESCALER_DIV128;       // Divide Clock ADC GCLK by 128 (48MHz/128 = 375kHz)
+  ADC1->CTRLB.reg = ADC_CTRLB_RESSEL_12BIT |          // Set ADC resolution to 12 bits
+                    ADC_CTRLB_FREERUN;                // Set ADC to free run mode       
+  while(ADC1->SYNCBUSY.bit.CTRLB);                    // Wait for synchronization
+  ADC1->CTRLA.bit.ENABLE = 1;                         // Enable the ADC
+  while(ADC1->SYNCBUSY.bit.ENABLE);                   // Wait for synchronization
+  ADC1->SWTRIG.bit.START = 1;                         // Initiate a software trigger to start an ADC conversion
+  while(ADC1->SYNCBUSY.bit.SWTRIG);                   // Wait for synchronization
 
-  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
-  channel_config_set_read_increment(&cfg, false);
-  channel_config_set_write_increment(&cfg, true);
-  channel_config_set_dreq(
-      &cfg, DREQ_ADC); // Pace transfers based on availability of ADC samples
+  // Enable DMA channel 1
+  DMAC->Channel[1].CHCTRLA.bit.ENABLE = 1;
 
-  // start ADC
-  adc_select_input(2);
-  hw_clear_bits(&adc_hw->fcs, ADC_FCS_UNDER_BITS);
-  hw_clear_bits(&adc_hw->fcs, ADC_FCS_OVER_BITS);
-  adc_fifo_setup(true, true, 1, false, false);
-  adc_run(true);
+  // Configure Timer/Counter 5
+  GCLK->PCHCTRL[TC5_GCLK_ID].reg = GCLK_PCHCTRL_CHEN |        // Enable perhipheral channel for TC5
+                                   GCLK_PCHCTRL_GEN_GCLK1;    // Connect generic clock 0 at 48MHz
+   
+  TC5->COUNT16.WAVE.reg = TC_WAVE_WAVEGEN_MFRQ;               // Set TC5 to Match Frequency (MFRQ) mode
+  TC5->COUNT16.CC[0].reg = 3200 - 1;                          // Set the trigger to 15 kHz: (48Mhz / 15000) - 1
+  while (TC5->COUNT16.SYNCBUSY.bit.CC0);                      // Wait for synchronization
 
-  // pre-fill ping buffer
-  dma_channel_configure(adc_dma, &cfg, ping, &adc_hw->fifo, 1024, true);
-  ping_running = true;
+  // Start Timer/Counter 5
+  TC5->COUNT16.CTRLA.bit.ENABLE = 1;                          // Enable the TC5 timer
+  while (TC5->COUNT16.SYNCBUSY.bit.ENABLE);                   // Wait for synchronization
 }
 
 // samples is a reference to a buffer containing block size samples
 void ADCAudio ::input_samples(uint16_t *&samples) {
-  if (ping_running) {
-    // wait for ping transfer to complete
-    dma_channel_wait_for_finish_blocking(adc_dma);
-    // start a transfer into pong buffer for next time
-    dma_channel_configure(adc_dma, &cfg, pong, &adc_hw->fifo, 1024, true);
-    samples = ping; // return ping buffer
-    ping_running = false;
-  } else {
-    // wait for ping transfer to complete
-    dma_channel_wait_for_finish_blocking(adc_dma);
-    // start a transfer into pong buffer for next time
-    dma_channel_configure(adc_dma, &cfg, ping, &adc_hw->fifo, 1024, true);
-    samples = pong; // return pong buffer
-    ping_running = true;
-  }
+  while (!data_ready);
+  if (count==0) samples=adc_buf_0;
+  else samples=adc_buf_1;
+  data_ready=false;
+  
 }
