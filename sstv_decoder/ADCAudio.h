@@ -2,25 +2,28 @@
 #define ADC_AUDIO_H
 
 #include <stdio.h>
-#include "hardware/adc.h"
-#include "hardware/dma.h"
+//#include <adc.h>
+#include "Adafruit_ZeroDMA.h"
 
+/* 
+Adaptation by Franciscu Capuzzi "Brabudu" 2025
+Based on 
+https://github.com/ShawnHymel/ei-keyword-spotting/blob/master/embedded-demos/arduino/wio-terminal/wio-terminal.ino
+* Author: Shawn Hymel
+*/
 
 class ADCAudio
 {
 
     public:
     ADCAudio();
-    void begin(const uint8_t audio_pin, const uint32_t audio_sample_rate);
+    void begin();
     void end();
     void input_samples(uint16_t*& samples);
 
     private:
     int adc_dma;
-    dma_channel_config cfg;
-    uint16_t ping[1024];
-    uint16_t pong[1024];
-    bool ping_running = true;
 };
 
 #endif
+
