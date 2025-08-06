@@ -1,9 +1,7 @@
-//  _  ___  _   _____ _     _                 
-// / |/ _ \/ | |_   _| |__ (_)_ __   __ _ ___ 
-// | | | | | |   | | | '_ \| | '_ \ / _` / __|
-// | | |_| | |   | | | | | | | | | | (_| \__ \.
-// |_|\___/|_|   |_| |_| |_|_|_| |_|\__, |___/
-//                                  |___/    
+
+
+//Adaptation for wio Terminal by Franciscu Capuzzi "Brabudu" 2025
+// from:
 //
 // Copyright (c) Jonathan P Dawson 2024
 // filename: sstv_decoder.ino
@@ -11,58 +9,18 @@
 //
 // SSTV Decoder using pi-pico.
 //
-// Accepts audio on ADC input, and displays on an ILI943x display.
-// Works with the Martin M1/2 and Scottie S1/2 and PD50/90.
-//
+
 // License: MIT
 //
-// MODS BY ON4ABR - 2025
-// * Option to invert the display when images ar negative
 
-#include "hardware/spi.h"
-#include "ili934x.h"
+
+#include <SPI.h>
 #include "font_8x5.h"
 #include "font_16x12.h"
 #include "decode_sstv.h"
 #include "ADCAudio.h"
-#include "splash.h"
 
-//CONFIGURATION SECTION
-///////////////////////////////////////////////////////////////////////////////
 
-#define PIN_MISO 12 //not used by TFT but part of SPI bus
-#define PIN_CS   13
-#define PIN_SCK  14
-#define PIN_MOSI 15 
-#define PIN_DC   11
-#define SPI_PORT spi1
-
-//!!Note, can be quite a bit of variation between TFT displays
-//if the display doesn't look right it can be fixed by changing these settings!!
-
-//If the image doesn't fill the display, or is rotated try changing
-//the ROTATION.
-
-//#define ROTATION R0DEG
-#define ROTATION R90DEG
-//#define ROTATION R180DEG
-//#define ROTATION R270DEG
-//#define ROTATION MIRRORED0DEG
-//#define ROTATION MIRRORED90DEG
-//#define ROTATION MIRRORED180DEG
-//#define ROTATION MIRRORED270DEG
-
-//The splash screen should have blue lettering, if you see red lettering 
-//try changing the INVERT_COLOURS setting.
-
-//#define INVERT_COLOURS false
-#define INVERT_COLOURS true
-
-//The splash screen should have a black background, if you have a white
-//background try changing this setting. Many thans to ON4ABR for adding 
-//this option.
-#define INVERT_DISPLAY false
-//#define INVERT_DISPLAY true
 
 #define STRETCH true
 //#define STRETCH false
@@ -75,54 +33,75 @@
 //END OF CONFIGURATION SECTION
 ///////////////////////////////////////////////////////////////////////////////
 
-ILI934X *display;
+#include"TFT_eSPI.h"
+
+TFT_eSPI display;
+ADCAudio adc_audio;
+c_sstv_decoder sstv_decoder(15000);
+
+s_sstv_mode *modes;
+
+int16_t dc;
+uint8_t line_rgb[320][4];
+uint16_t last_pixel_y=0;
 
 void setup() {
+  Serial.begin(115200);
+  delay(500);
   configure_display();
-  Serial.println("Pico SSTV Copyright (C) Jonathan P Dawson 2024");
-  Serial.println("github: https://github.com/dawsonjon/101Things");
-  Serial.println("docs: 101-things.readthedocs.io");
-}
 
 
-void loop() {
-  ADCAudio adc_audio;
-  adc_audio.begin(28, 15000);
-  c_sstv_decoder sstv_decoder(15000);
-  s_sstv_mode *modes = sstv_decoder.get_modes();
-  int16_t dc;
-  uint8_t line_rgb[320][4];
-  uint16_t last_pixel_y=0;
+  pinMode(WIO_KEY_A, INPUT_PULLUP);
+  pinMode(WIO_KEY_B, INPUT_PULLUP);
+  pinMode(WIO_KEY_C, INPUT_PULLUP);
+
+  adc_audio.begin();
+  
+  modes = sstv_decoder.get_modes();
+  
 
   sstv_decoder.set_auto_slant_correction(ENABLE_SLANT_CORRECTION);
   sstv_decoder.set_timeout_seconds(LOST_SIGNAL_TIMEOUT_SECONDS);
-  
-  while(1)
-  {
-    uint16_t *samples;
-    adc_audio.input_samples(samples);
 
+ }
+
+
+void loop() {
+  {
+    
+     if (digitalRead(WIO_KEY_A) == LOW) {
+       //TODO
+     }
+     if (digitalRead(WIO_KEY_B) == LOW) {
+       //TODO
+     }
+    uint16_t *samples;
+    
+    adc_audio.input_samples(samples);
+    
     for(uint16_t idx=0; idx<1024; idx++)
     {
       dc = dc + (samples[idx] - dc)/2;
       int16_t sample = samples[idx] - dc;
+           
       uint16_t pixel_y;
       uint16_t pixel_x;
       uint8_t pixel_colour;
       uint8_t pixel;
       int16_t frequency;
       const bool new_pixel = sstv_decoder.decode_audio(sample, pixel_y, pixel_x, pixel_colour, pixel, frequency);
-
+      
       if(new_pixel)
       {
+        
           e_mode mode = sstv_decoder.get_mode();
 
           if(pixel_y > last_pixel_y)
           {
 
             //convert from 24 bit to 16 bit colour
-            uint16_t line_rgb565[320];
-            uint16_t scaled_pixel_y = 0;
+            uint32_t line_rgb565[320];
+            uint32_t scaled_pixel_y = 0;
 
             if(mode == pd_50 || mode == pd_90 || mode == pd_120 || mode == pd_180)
             {
@@ -150,9 +129,9 @@ void loop() {
                 r = r<0?0:(r>255?255:r);
                 g = g<0?0:(g>255?255:g);
                 b = b<0?0:(b>255?255:b);
-                line_rgb565[x] = display->colour565(r, g, b);
+                line_rgb565[x] = display.color565(r, g, b);
               }
-              display->writeHLine(0, scaled_pixel_y*2, 320, line_rgb565);
+              writeHLine(0, scaled_pixel_y*2, 320, line_rgb565);
               for(uint16_t x=0; x<320; ++x)
               {
                 int16_t y  = line_rgb[x][3];
@@ -166,23 +145,23 @@ void loop() {
                 r = r<0?0:(r>255?255:r);
                 g = g<0?0:(g>255?255:g);
                 b = b<0?0:(b>255?255:b);
-                line_rgb565[x] = display->colour565(r, g, b);
+                line_rgb565[x] = display.color565(r, g, b);
               }
-              display->writeHLine(0, scaled_pixel_y*2 + 1, 320, line_rgb565);
+              writeHLine(0, scaled_pixel_y*2 + 1, 320, line_rgb565);
             }
             else
             {
               for(uint16_t x=0; x<320; ++x)
               {
-                line_rgb565[x] = display->colour565(line_rgb[x][0], line_rgb[x][1], line_rgb[x][2]);
+                line_rgb565[x] = display.color565(line_rgb[x][0], line_rgb[x][1], line_rgb[x][2]);
               }
-              display->writeHLine(0, last_pixel_y, 320, line_rgb565);
+              writeHLine(0, last_pixel_y, 320, line_rgb565);
               
             }
             for(uint16_t x=0; x<320; ++x) line_rgb[x][0] = line_rgb[x][1] = line_rgb[x][2] = 0;
 
             //update progress
-            display->fillRect(320-(21*6)-2, 240-10, 10, 21*6+2, COLOUR_BLACK);
+            display.fillRect(320-(21*6)-2, 240-10, 10, 21*6+2, TFT_BLACK); 
             char buffer[21];
             if(mode==martin_m1)
             {
@@ -220,7 +199,7 @@ void loop() {
             {
               snprintf(buffer, 21, "PD 180: %ux%u", modes[mode].width, last_pixel_y+1);
             }
-            display->drawString(320-(21*6), 240-8, font_8x5, buffer, COLOUR_WHITE, COLOUR_BLACK);
+            display.drawString(buffer, (int32_t) (320-(21*6)), (int32_t) (240-8));//, font_8x5);// ,  TFT_WHITE, TFT_BLACK);
             Serial.println(buffer);
 
           }
@@ -247,33 +226,17 @@ void loop() {
 
     }
   }
-  adc_audio.end();
-}
-
-void draw_splash_screen()
-{
-  uint32_t z=0;
-  for(uint16_t y=0;y<240; ++y)
-  {
-    display->writeHLine(0, y, 320, &splash[z]);
-    z+=320;
-  }
+  
 }
 
 void configure_display()
 {
-  spi_init(SPI_PORT, 62500000);
-  gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
-  gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
-  gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
-  gpio_init(PIN_CS);
-  gpio_set_dir(PIN_CS, GPIO_OUT);
-  gpio_init(PIN_DC);
-  gpio_set_dir(PIN_DC, GPIO_OUT);
-  display = new ILI934X(SPI_PORT, PIN_CS, PIN_DC, 320, 240, R0DEG, INVERT_DISPLAY);
-  display->setRotation(ROTATION, INVERT_COLOURS);
-  display->init();
-  display->powerOn(true);
-  display->clear();
-  draw_splash_screen();
+    display.begin();
+    display.setRotation(3);
+    digitalWrite(LCD_BACKLIGHT, HIGH); // turn on the backlight
+    display.drawString("SSTV decoder V1.0",20,0);
+}
+
+void writeHLine(int32_t x, int32_t y, int32_t w, uint32_t* color) {
+  for (int i=x;i<w+x;i++) display.drawPixel(i,y, color[i]);
 }
