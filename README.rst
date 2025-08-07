@@ -1,6 +1,8 @@
 Slow Scan Television Decoder for Seeed Wio Terminal
 ================================================
 
+.. image::  sstv.jpeg
+
 Credits
 -------
 
