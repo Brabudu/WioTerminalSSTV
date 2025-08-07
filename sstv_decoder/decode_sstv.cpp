@@ -4,6 +4,22 @@
 #include "decode_sstv.h"
 #include "cordic.h"
 
+void c_sstv_decoder :: reset() {
+  sync_counter = 0;
+  y_pixel = 0;
+  last_x = 0;
+  image_sample = 0;
+  last_sample = 0;
+  last_hsync_sample = 0;
+  sample_number = 0;
+  confirmed_sync_sample = 0;
+  state = detect_sync;
+  sync_state = detect;
+  sync_timeout = 0;
+  last_phase = 0;
+  ssb_phase = 0;
+}
+
 //from the sample number work out the colour and x/y coordinates
 void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour, int32_t image_sample)
 {
@@ -22,7 +38,7 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
 
   }
 
-  else if( decode_mode == scottie_s1 || decode_mode == scottie_s2 )
+  else if( decode_mode == scottie_s1 || decode_mode == scottie_s2 || decode_mode == scottie_dx )
   {
 
 
@@ -207,7 +223,20 @@ c_sstv_decoder :: c_sstv_decoder(float Fs)
   modes[scottie_s2].samples_per_hsync = scale*Fs*hsync_pulse_ms/1000.0;
   modes[scottie_s2].max_height = 256;
   }
-
+//scottie dx
+  {
+  const uint16_t width = 320;
+  const float hsync_pulse_ms = 9;
+  const float colour_gap_ms = 1.5;
+  const float colour_time_ms = 345.600;
+  modes[scottie_dx].width = width;
+  modes[scottie_dx].samples_per_line = scale*Fs*((colour_time_ms*3)+(colour_gap_ms*3) + hsync_pulse_ms)/1000.0;
+  modes[scottie_dx].samples_per_colour_line = scale*Fs*(colour_time_ms+colour_gap_ms)/1000.0;
+  modes[scottie_dx].samples_per_colour_gap = scale*Fs*colour_gap_ms/1000.0;
+  modes[scottie_dx].samples_per_pixel = scale*Fs*colour_time_ms/(1000.0 * width);
+  modes[scottie_dx].samples_per_hsync = scale*Fs*hsync_pulse_ms/1000.0;
+  modes[scottie_dx].max_height = 256;
+  }
   //pd 50
   {
   const uint16_t width = 320;
@@ -496,6 +525,7 @@ bool c_sstv_decoder :: decode(uint16_t sample, uint16_t &pixel_y, uint16_t &pixe
       //if no hsync seen, go back to idle
       else
       {
+        
         sync_timeout--;
         if(!sync_timeout)
         {

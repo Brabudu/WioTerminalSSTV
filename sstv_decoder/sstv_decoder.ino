@@ -70,7 +70,10 @@ void loop() {
   {
     
      if (digitalRead(WIO_KEY_A) == LOW) {
-       //TODO
+       last_pixel_y=0;
+       dc=0;
+       sstv_decoder.reset();
+       configure_display();
      }
      if (digitalRead(WIO_KEY_B) == LOW) {
        //TODO
@@ -178,6 +181,10 @@ void loop() {
             else if(mode==scottie_s2)
             {
               snprintf(buffer, 21, "Scottie S2: %ux%u", modes[mode].width, last_pixel_y+1);
+            }
+            else if(mode==scottie_dx)
+            {
+              snprintf(buffer, 21, "Scottie DX: %ux%u", modes[mode].width, last_pixel_y+1);
             }
             else if(mode==sc2_120)
             {

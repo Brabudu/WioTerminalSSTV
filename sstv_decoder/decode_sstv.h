@@ -9,6 +9,7 @@ enum e_mode
   martin_m2, 
   scottie_s1, 
   scottie_s2, 
+  scottie_dx,
   pd_50,
   pd_90,
   pd_120,
@@ -85,7 +86,7 @@ class c_sstv_decoder
   void set_auto_slant_correction(bool enable);
   e_mode get_mode();
   s_sstv_mode * get_modes();
-
+  void reset();
   
 };
 
