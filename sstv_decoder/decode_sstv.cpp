@@ -3,9 +3,13 @@
 #include <cmath>
 #include "decode_sstv.h"
 #include "cordic.h"
+#include <HardwareSerial.h>
+
+extern Stream* s;
 
 void c_sstv_decoder :: reset() {
   sync_counter = 0;
+  vsync_counter = 0;
   y_pixel = 0;
   last_x = 0;
   image_sample = 0;
@@ -15,6 +19,7 @@ void c_sstv_decoder :: reset() {
   confirmed_sync_sample = 0;
   state = detect_sync;
   sync_state = detect;
+  vsync_state = detect;
   sync_timeout = 0;
   last_phase = 0;
   ssb_phase = 0;
@@ -28,19 +33,45 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
 
   if( decode_mode == martin_m1 || decode_mode == martin_m2 )
   {
-
     y = image_sample/mean_samples_per_line;
     image_sample -= y*mean_samples_per_line;
     colour = image_sample/modes[decode_mode].samples_per_colour_line;
     image_sample -= colour*modes[decode_mode].samples_per_colour_line;
     colour = colourmap[colour];
     x = image_sample/modes[decode_mode].samples_per_pixel;
-
   }
 
-  else if( decode_mode == scottie_s1 || decode_mode == scottie_s2 || decode_mode == scottie_dx )
+  else if(decode_mode == robot36)
   {
-
+    
+    image_sample -= modes[decode_mode].samples_per_hsync;
+    if(image_sample < 0)
+    {
+      //return colour 4 for non-displayable pixels (e.g. during hsync)
+      x = 0; y=0; colour=4;
+      return;
+    }
+    y = image_sample/mean_samples_per_line;
+    image_sample -= y*mean_samples_per_line;
+   
+    //Double duration of y channel
+    if (image_sample<modes[decode_mode].samples_per_colour_line*2)
+    {
+        colour = 0; 
+        x = image_sample/(modes[decode_mode].samples_per_pixel*2);
+    } else if (image_sample<modes[decode_mode].samples_per_colour_line*2+modes[robot36].samples_per_colour_gap) {
+      //For detecting 2300 or 1500 sync
+      colour=3;
+      x=(image_sample-modes[decode_mode].samples_per_colour_line*2)/modes[decode_mode].samples_per_pixel;
+    } else if (image_sample>modes[decode_mode].samples_per_colour_line*2+modes[robot36].samples_per_colour_gap) {
+        //Alternatively channel 1 (cr) and 2 (cb)    
+        colour = 1+(y%2);
+        image_sample -=modes[decode_mode].samples_per_colour_line*2+modes[robot36].samples_per_colour_gap; 
+        x = image_sample/(modes[decode_mode].samples_per_pixel);
+    } 
+  }
+  else if( decode_mode == scottie_s1 || decode_mode == scottie_s2 || decode_mode == scottie_dx)
+  {
 
     //with scottie, sync id mid-line between blue and red.
     //subtract the red period to sync to next full line
@@ -48,14 +79,15 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
     image_sample -= modes[decode_mode].samples_per_hsync;
     if(image_sample < 0)
     {
-        //return colour 4 for non-displayable pixels (e.g. during hsync)
+        //return colour 5 for non-displayable pixels (e.g. during hsync)
         x = 0; y=0; colour=4;
         return;
     }
 
     y = image_sample/mean_samples_per_line;
+    
     image_sample -= y*mean_samples_per_line;
-
+   
     //hsync is between blue and red component (not at end of line)
     //for red component, subtract the length of the scan-line
     if( image_sample < 2*modes[decode_mode].samples_per_colour_line)
@@ -71,7 +103,7 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
     }
     if( image_sample < 0 )
     {
-        //return colour 4 for non-displayable pixels (e.g. during hsync)
+        //return colour 5 for non-displayable pixels (e.g. during hsync)
         x = 0; y=0; colour=4;
         return;
     }
@@ -81,7 +113,7 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
 
   }
 
-  else if( decode_mode == pd_50 || decode_mode == pd_90 || decode_mode == pd_120 || decode_mode == pd_180)
+  else if( decode_mode == pd_50 || decode_mode == pd_90 || decode_mode == pd_120 || decode_mode == pd_180) 
   {
     static const uint8_t colourmap[5] = {0, 1, 2, 3, 4};
 
@@ -100,7 +132,7 @@ void c_sstv_decoder :: sample_to_pixel(uint16_t &x, uint16_t &y, uint8_t &colour
     x = image_sample/modes[decode_mode].samples_per_pixel;
   }
 
-  else if( decode_mode == sc2_120)
+  else if( decode_mode == sc2_120 )
   {
 
     y = image_sample/mean_samples_per_line;
@@ -164,6 +196,7 @@ c_sstv_decoder :: c_sstv_decoder(float Fs)
   m_auto_slant_correction = true;
   m_timeout = m_Fs*30;
 
+ 
   //martin m1
   {
   const uint16_t width = 320;
@@ -209,7 +242,7 @@ c_sstv_decoder :: c_sstv_decoder(float Fs)
   modes[scottie_s1].max_height = 256;
   }
 
-  //scottie s2
+  //scottie s2 277,7
   {
   const uint16_t width = 160;
   const float hsync_pulse_ms = 9;
@@ -267,7 +300,7 @@ c_sstv_decoder :: c_sstv_decoder(float Fs)
   modes[pd_90].max_height = 128;
   }
 
-  //pd 120
+  //pd 120 254,24
   {
   const uint16_t width = 320; //use 320 rather than 640 as an easy way to scale image
   const float hsync_pulse_ms = 20;
@@ -310,6 +343,20 @@ c_sstv_decoder :: c_sstv_decoder(float Fs)
   modes[sc2_120].samples_per_pixel = scale*Fs*colour_time_ms/(1000.0 * width);
   modes[sc2_120].samples_per_hsync = m_scale*Fs*hsync_pulse_ms/1000.0;
   modes[sc2_120].max_height = 256;
+  }
+  //Robot36 tot:150
+  {
+  const uint16_t width = 320;
+  const float hsync_pulse_ms = 9;
+  const float colour_gap_ms = 6;
+  const float colour_time_ms = 44;
+  modes[robot36].width = width;
+  modes[robot36].samples_per_line = scale*Fs*((colour_time_ms*3)+ (colour_gap_ms*1.5) + hsync_pulse_ms)/1000.0;
+  modes[robot36].samples_per_colour_line = scale*Fs*(colour_time_ms)/1000.0;
+  modes[robot36].samples_per_colour_gap = scale*Fs*colour_gap_ms/1000.0;
+  modes[robot36].samples_per_pixel = scale*Fs*colour_time_ms/(1000.0 * width);
+  modes[robot36].samples_per_hsync = m_scale*Fs*hsync_pulse_ms/1000.0;
+  modes[robot36].max_height = 240;
   }
 
   cordic_init();
@@ -373,15 +420,20 @@ bool c_sstv_decoder :: decode_iq(int16_t sample_i, int16_t sample_q, uint16_t &p
   cordic_rectangular_to_polar(sample_i, sample_q, magnitude, phase);
   frequency = last_phase-phase;
   last_phase = phase;
+  
 
   int16_t sample = (int32_t)frequency*15000>>16;
 
 
   static uint32_t smoothed_sample = 0;
-  smoothed_sample = ((smoothed_sample << 3) + sample - smoothed_sample) >> 3;
+  smoothed_sample = ((smoothed_sample << 4) + sample - smoothed_sample) >> 4;
   smoothed_sample_16 = std::min(std::max(smoothed_sample, (uint32_t)1000u), (uint32_t)2500u);
 
+  static uint16_t smoothed_mag = 0;
+  smoothed_mag = (smoothed_mag *10 + magnitude)/11;
+
   e_state debug_state;
+  //if (smoothed_mag>50) return decode(smoothed_sample_16, pixel_y, pixel_x, pixel_colour, pixel, debug_state);
   return decode(smoothed_sample_16, pixel_y, pixel_x, pixel_colour, pixel, debug_state);
 
 }
@@ -389,7 +441,7 @@ bool c_sstv_decoder :: decode_iq(int16_t sample_i, int16_t sample_q, uint16_t &p
 bool c_sstv_decoder :: decode(uint16_t sample, uint16_t &pixel_y, uint16_t &pixel_x, uint8_t &pixel_colour, uint8_t &pixel, e_state &debug_state)
 {
 
-
+  
   //detect scan syncs
   bool sync_found = false;
   uint32_t line_length = 0u;
@@ -406,6 +458,8 @@ bool c_sstv_decoder :: decode(uint16_t sample, uint16_t &pixel_y, uint16_t &pixe
     if( sample < 1300)
     {
       sync_counter++;
+      //mean_f=(mean_f*3+sample)/4;
+      //s->println(mean_f);
     }
     else if(sync_counter > 0)
     {
@@ -418,14 +472,13 @@ bool c_sstv_decoder :: decode(uint16_t sample, uint16_t &pixel_y, uint16_t &pixe
       line_length = sample_number-last_hsync_sample;
       last_hsync_sample = sample_number;
       sync_state = detect;
+     
     }
   }
-
 
   bool pixel_complete = false;
   switch(state)
   {
-
     case detect_sync:
 
       if(sync_found)
@@ -437,6 +490,7 @@ bool c_sstv_decoder :: decode(uint16_t sample, uint16_t &pixel_y, uint16_t &pixe
           {
             mean_samples_per_line = modes[mode].samples_per_line;
             uint32_t error = abs(((int32_t)(line_length*m_scale))-(int32_t)modes[mode].samples_per_line);
+            
             if(error < least_error)
             {
               decode_mode = (e_mode)mode;
