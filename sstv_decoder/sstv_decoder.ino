@@ -1,6 +1,12 @@
 
 
 //Adaptation for wio Terminal by Franciscu Capuzzi "Brabudu" 2025
+//
+// Added features:
+// - Rotate, reset and invert key
+// - Scottie dx mode
+// - Memory save
+//
 // from:
 //
 // Copyright (c) Jonathan P Dawson 2024
@@ -13,14 +19,13 @@
 // License: MIT
 //
 
-
-#include <SPI.h>
 #include "font_8x5.h"
 #include "font_16x12.h"
 #include "decode_sstv.h"
 #include "ADCAudio.h"
+#include <HardwareSerial.h>
 
-
+#include <FlashAsEEPROM.h>
 
 #define STRETCH true
 //#define STRETCH false
@@ -37,7 +42,7 @@
 
 TFT_eSPI display;
 ADCAudio adc_audio;
-c_sstv_decoder sstv_decoder(15000);
+c_sstv_decoder sstv_decoder(15000); 
 
 s_sstv_mode *modes;
 
@@ -45,10 +50,19 @@ int16_t dc;
 uint8_t line_rgb[320][4];
 uint16_t last_pixel_y=0;
 
+uint8_t rotation=3;
+bool inverted=false;
+Stream* s;
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  configure_display();
+  s=&Serial;
+  if (EEPROM.isValid()) {
+    rotation=EEPROM.read(0);
+    inverted=EEPROM.read(1);
+ }
+  configure_display(rotation,inverted);
 
 
   pinMode(WIO_KEY_A, INPUT_PULLUP);
@@ -73,15 +87,25 @@ void loop() {
        last_pixel_y=0;
        dc=0;
        sstv_decoder.reset();
-       configure_display();
+       configure_display(rotation,inverted);
      }
      if (digitalRead(WIO_KEY_B) == LOW) {
-       //TODO
+       if (rotation==3) rotation=1;
+       else rotation=3;
+       configure_display(rotation,inverted);
+       while (digitalRead(WIO_KEY_B) == LOW);
+     }
+     if (digitalRead(WIO_KEY_C) == LOW) {
+       inverted=!inverted;
+       display.invertDisplay(inverted);
+       writeEEPROM();
+       while (digitalRead(WIO_KEY_C) == LOW);
      }
     uint16_t *samples;
     
     adc_audio.input_samples(samples);
     
+     
     for(uint16_t idx=0; idx<1024; idx++)
     {
       dc = dc + (samples[idx] - dc)/2;
@@ -110,7 +134,7 @@ void loop() {
             {
 
               //rescale imaagesto fit on screen
-              if(mode == pd_120 || mode == pd_180)
+              if(mode == pd_120 || mode == pd_180 )
               {
                 scaled_pixel_y = (uint32_t)last_pixel_y * 240 / 496; 
               }
@@ -152,7 +176,41 @@ void loop() {
               }
               writeHLine(0, scaled_pixel_y*2 + 1, 320, line_rgb565);
             }
-            else
+            else if (mode == robot36) {
+                //Detect crominance phase
+                uint8_t count=0;
+                for(uint16_t x=0; x<40; ++x) {
+                  if (line_rgb[x][3]>128) count++;
+                }
+
+                uint8_t crc=2;
+                uint8_t cbc=1;
+               
+                if ((count<20 && (last_pixel_y%2==0))||(count>20)&& (last_pixel_y%2==1)) {
+                  crc=1;
+                  cbc=2;
+                }
+
+                for(uint16_t x=0; x<320; ++x)
+                {
+                  int16_t y  = line_rgb[x][0];    
+                  int16_t cr = line_rgb[x][crc];
+                  int16_t cb = line_rgb[x][cbc]; 
+                  
+                  cr = cr - 128;
+                  cb = cb - 128;
+                  int16_t r = y + 45 * cr / 32;
+                  int16_t g = y - (11 * cb + 23 * cr) / 32;
+                  int16_t b = y + 113 * cb / 64;
+                  r = r<0?0:(r>255?255:r);
+                  g = g<0?0:(g>255?255:g);
+                  b = b<0?0:(b>255?255:b);
+
+                 line_rgb565[x] = display.color565(r, g, b);            
+                 
+                }
+              writeHLine(0, last_pixel_y, 320, line_rgb565);
+            } else 
             {
               for(uint16_t x=0; x<320; ++x)
               {
@@ -161,11 +219,16 @@ void loop() {
               writeHLine(0, last_pixel_y, 320, line_rgb565);
               
             }
-            for(uint16_t x=0; x<320; ++x) line_rgb[x][0] = line_rgb[x][1] = line_rgb[x][2] = 0;
-
+            for(uint16_t x=0; x<320; ++x) {
+              line_rgb[x][0] = 0;
+              //Robot36 cr and cb must persist 2 lines
+              if (mode != robot36 ) line_rgb[x][1] = line_rgb[x][2] = 0;
+            }            
             //update progress
             display.fillRect(320-(21*6)-2, 240-10, 10, 21*6+2, TFT_BLACK); 
+                    
             char buffer[21];
+
             if(mode==martin_m1)
             {
               snprintf(buffer, 21, "Martin M1: %ux%u", modes[mode].width, last_pixel_y+1);
@@ -206,8 +269,13 @@ void loop() {
             {
               snprintf(buffer, 21, "PD 180: %ux%u", modes[mode].width, last_pixel_y+1);
             }
+            else if(mode==robot36)
+            {
+              snprintf(buffer, 21, "Robot36: %ux%u", modes[mode].width, last_pixel_y+1);
+            }
+           
             display.drawString(buffer, (int32_t) (320-(21*6)), (int32_t) (240-8));//, font_8x5);// ,  TFT_WHITE, TFT_BLACK);
-            Serial.println(buffer);
+            //Serial.println(buffer);
 
           }
           last_pixel_y = pixel_y;
@@ -228,20 +296,28 @@ void loop() {
             }
 
           }
-          
       }
-
+      
     }
   }
   
 }
 
-void configure_display()
+void configure_display(uint8_t rot,bool inv)
 {
+    
     display.begin();
-    display.setRotation(3);
+    display.setRotation(rot);
     digitalWrite(LCD_BACKLIGHT, HIGH); // turn on the backlight
     display.drawString("SSTV decoder V1.0",20,0);
+    display.invertDisplay(inv);
+    writeEEPROM();
+
+}
+void writeEEPROM() {
+   EEPROM.write(0,rotation);
+    EEPROM.write(1,inverted);
+    EEPROM.commit();
 }
 
 void writeHLine(int32_t x, int32_t y, int32_t w, uint32_t* color) {
