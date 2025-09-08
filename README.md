@@ -1,5 +1,6 @@
 This is a sstv decoder for Seeed Wio Terminal based upon the library PicoSSTV of Jon Dawson https://github.com/dawsonjon/PicoSSTV.
 
+.. image::  img/sstv.jpg
 
 Installation:
 ------------
