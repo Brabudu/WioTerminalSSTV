@@ -5,16 +5,15 @@
 //
 // License: MIT
 //
-// Libraries needed: 
-//
-// * SSTV pico library https://github.com/dawsonjon/PicoSSTV/tree/encoder/sstv_library
-// 
-// Remove ADCAudio.cpp and ADCAudio.h from sstv_library
+
 
 #include "sstv_decoder.h"
 #include "ADCAudioWio.h"
 #include "TFT_eSPI.h"
 
+#include <bmp_lib.h>
+#include <Seeed_FS.h>         //Seeed Arduino FS needed
+#include "SD/Seeed_SD.h"
 
 #define ENABLE_SLANT_CORRECTION true
 //#define ENABLE_SLANT_CORRECTION false
@@ -26,11 +25,47 @@
 
 TFT_eSPI display=TFT_eSPI();
 
+File myImg;
+
 uint8_t display_rotation=3;
+bool sd=true;
+
+class c_bmp_writer_stdio : public c_bmp_writer
+{
+
+    File myFile;
+
+    bool file_open(const char* filename)
+    {
+      if (sd) myFile = SD.open(filename, FILE_WRITE);
+      return (myFile);
+    
+    }
+
+    void file_close()
+    {
+      if(myFile) myFile.close();
+    }
+
+    void file_write(const void* data, uint32_t element_size, uint32_t num_elements)
+    {
+      if(myFile) myFile.write((char*)data, element_size*num_elements);
+    }
+
+    void file_seek(uint32_t offset)
+    {
+       if(myFile) myFile.seek(offset);
+    }
+
+    FILE* f;
+};
+
+
 
 //c_sstv_decoder provides a reusable SSTV decoder
 //We need to override some hardware specific functions to make it work with
 //ADC audio input and TFT image display
+
 class c_sstv_decoder_io : public c_sstv_decoder
 {
  
@@ -38,6 +73,7 @@ class c_sstv_decoder_io : public c_sstv_decoder
   uint16_t row_number = 0;
   const uint16_t display_width = 320;
   const uint16_t display_height = 240 - 10; //allow space for status bar
+  uint16_t tft_row_number = 0;
 
   //override the get_audio_sample function to read ADC audio
   int16_t get_audio_sample()
@@ -61,7 +97,12 @@ class c_sstv_decoder_io : public c_sstv_decoder
   void image_write_line(uint16_t line_rgb565[], uint16_t y, uint16_t width, uint16_t height, const char* mode_string)
   {
 
-    //Serial.println(y);
+    //write unscaled image to bmp file
+    output_file.change_width(width);
+    output_file.change_height(y+1);
+
+    //write unscaled image to bmp file
+    if(++bmp_row_number < height) output_file.write_row_rgb565(line_rgb565);
 
     //scale image to fit TFT size
     uint16_t scaled_row[display_width];
@@ -142,7 +183,26 @@ class c_sstv_decoder_io : public c_sstv_decoder
 
   }
 
+  c_bmp_writer_stdio output_file;
+  uint16_t bmp_row_number = 0;
+
   public:
+
+  void open(const char* bmp_file_name){
+    tft_row_number = 0;
+    bmp_row_number = 0;
+    Serial.print("opening bmp file: ");
+    Serial.println(bmp_file_name);
+    output_file.open(bmp_file_name, 10, 10); //image size gets updated later
+  }
+
+  void close(){
+    tft_row_number = 0;
+    bmp_row_number = 0;
+    Serial.println("closing bmp file");
+    output_file.update_header();
+    output_file.close();
+  }
 
   void start(){adc_audio.begin(28, 15000); row_number = 0;}
   void stop(){adc_audio.end();}
@@ -159,19 +219,30 @@ void setup() {
   pinMode(WIO_KEY_A, INPUT_PULLUP);
   pinMode(WIO_KEY_B, INPUT_PULLUP);
   pinMode(WIO_KEY_C, INPUT_PULLUP);
+
+  if (!SD.begin(SDCARD_SS_PIN, SDCARD_SPI)) {
+    sd=false;
+    Serial.println("initialization failed!");
+  }
   
 }
 
 void loop() {
   c_sstv_decoder_io sstv_decoder(15000);
-  bool cycle=true;
+  sstv_decoder.open("temp");
+  char filename[100];
+  get_new_filename(filename, 100);
+  sstv_decoder.start();
+
   
-    sstv_decoder.start();
+  bool autosave=true;
+
   bool image_in_progress = false;
   while(!sstv_decoder.decode_image_non_blocking(LOST_SIGNAL_TIMEOUT_SECONDS, ENABLE_SLANT_CORRECTION, image_in_progress)) {
       if (digitalRead(WIO_KEY_A)==LOW) {
       while (digitalRead(WIO_KEY_A)==HIGH);
       display.begin(TFT_BLACK);
+      autosave=false;
       break;
     } else
     if (digitalRead(WIO_KEY_B)==LOW) {
@@ -182,16 +253,29 @@ void loop() {
 
       display.setRotation(display_rotation);
       display.begin(TFT_BLACK);
+      autosave=false;
       break;
-  };
-   
-    sstv_decoder.stop();
-  
-    
-    
-
-
+    };
   }
+  sstv_decoder.close();
+  if (autosave) {
+    SD.rename("temp", filename);
+    Serial.print("copy to: ");
+    Serial.println(filename);
+    get_new_filename(filename, 100);
+  }
+  sstv_decoder.open("temp");
+  sstv_decoder.stop();
+  autosave=true;
+}
+
+void get_new_filename(char *buffer, uint16_t buffer_size)
+{
+  static uint16_t serial_number = 0; 
+  do{
+    snprintf(buffer, buffer_size, "sstv_rx_%u.bmp", serial_number);
+    serial_number++;
+  } while(SD.exists(buffer));
 }
 
 void configure_display()
