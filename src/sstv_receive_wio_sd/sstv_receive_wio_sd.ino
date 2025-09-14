@@ -73,7 +73,7 @@ class c_bmp_reader_stdio : public c_bmp_reader {
   }
 
   uint32_t file_read(void* data, uint32_t element_size, uint32_t num_elements) {
-    if (myFile) return myFile.read((char*)data, element_size * num_elements);
+    if (myFile) return myFile.read(data, element_size * num_elements);
   }
 
   void file_seek(uint32_t offset) {
@@ -247,7 +247,7 @@ public:
     num_bitmaps = count_bitmaps(root);
     bitmap_index = 0;
     last_update_time = 0;
-    Serial.println(num_bitmaps);
+    
   }
 
   void update_slideshow() {
@@ -257,7 +257,7 @@ public:
     static const uint16_t timeouts[] = { 0, 1, 2, 5, 10, 30, 60, 60 * 2, 60 * 5 };
     uint16_t timeout_milliseconds = 1000 * timeouts[1];
 
-    Serial.println("update");
+    
     if (((millis() - last_update_time) > timeout_milliseconds) && (timeout_milliseconds != 0)) {
       last_update_time = millis();
       if (bitmap_index == num_bitmaps - 1) bitmap_index = 0;
@@ -281,7 +281,6 @@ public:
       delay(100);
       if (bitmap_index == num_bitmaps - 1) bitmap_index = 0;
       else bitmap_index++;
-      Serial.println(bitmap_index);
       redraw = true;
     }
 
@@ -293,10 +292,9 @@ public:
     }
 
     if (redraw) {
-      get_bitmap_index(root, bitmap_index);
-      filename = root.name();
-      Serial.println(filename);
-      display_image(filename.c_str());
+      File f=get_bitmap_index(root, bitmap_index);
+      filename = f.name();
+      display_image(filename.substring(3).c_str());
       uint16_t width = strlen(filename.c_str()) * 6 + 10;
       //draw_banner(filename.c_str());
       //draw_button_bar("Menu", "Delete", "Last", "Next");
@@ -305,21 +303,22 @@ public:
 
   uint16_t count_bitmaps(File& root) {
     uint16_t count = 0;
+    File f;
     root.rewindDirectory();
-    while (root.openNextFile()) {
-      String filename = root.name();
-      Serial.println(filename);
-      if (!root.isDirectory() && filename.endsWith(".bmp")) count++;
+    while (f=root.openNextFile()) {
+      String filename = f.name();
+      if (!f.isDirectory() && filename.endsWith(".bmp")) count++;
     }
     return count;
   }
-  void get_bitmap_index(File& root, uint16_t index) {
+  File get_bitmap_index(File& root, uint16_t index) {
+    File f;
     uint16_t count = 0;
     root.rewindDirectory();
-    while (root.openNextFile()) {
-      String filename = root.name();
-      if (!root.isDirectory() && filename.endsWith(".bmp")) {
-        if (count == index) return;
+    while (f=root.openNextFile()) {
+      String filename = f.name();
+      if (!f.isDirectory() && filename.endsWith(".bmp")) {
+        if (count == index) return f;
         count++;
       }
     }
@@ -327,10 +326,11 @@ public:
   void display_image(const char* filename) {
     c_bmp_reader_stdio bitmap;
     uint16_t width, height;
-    bitmap.open(filename, width, height);
+    Serial.println(bitmap.open(filename, width, height));
 
     const uint16_t display_width = DISPLAY_WIDTH, display_height = DISPLAY_HEIGHT - BAR_HEIGHT;
     uint16_t tft_row_number = 0;
+    Serial.println(height);
 
     for (uint16_t y = 0; y < height; y++) {
       uint16_t line_rgb565[width];
@@ -439,6 +439,7 @@ void loop() {
     while (1) {
 
       slideshow.update_slideshow();
+      delay(1000);
     }
     sstv_decoder.open("temp");
     //capture=true;
