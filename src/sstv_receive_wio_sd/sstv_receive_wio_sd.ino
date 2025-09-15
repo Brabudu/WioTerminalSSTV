@@ -7,6 +7,21 @@
 //
 
 
+// KEYS:
+
+// Capture mode:
+// ------------
+// A : Reset capture
+// B : Rotate screen
+// C : Enter slideshow mode
+
+// Slideshow mode:
+// ---------------
+// Right: change slide
+// Left: change slide
+// B (long press): delete slide
+// C : Return to capture mode
+
 #include "sstv_decoder.h"
 #include "ADCAudioWio.h"
 #include "TFT_eSPI.h"
@@ -247,28 +262,29 @@ public:
     num_bitmaps = count_bitmaps(root);
     bitmap_index = 0;
     last_update_time = 0;
-    
+    update_slideshow(true);
   }
 
-  void update_slideshow() {
+  void update_slideshow(bool redraw) {
     if (num_bitmaps == 0) return;
-    bool redraw = false;
 
     static const uint16_t timeouts[] = { 0, 1, 2, 5, 10, 30, 60, 60 * 2, 60 * 5 };
-    uint16_t timeout_milliseconds = 1000 * timeouts[1];
+    uint16_t timeout_milliseconds = 1000 * timeouts[0];
 
-    
+    /*
     if (((millis() - last_update_time) > timeout_milliseconds) && (timeout_milliseconds != 0)) {
       last_update_time = millis();
       if (bitmap_index == num_bitmaps - 1) bitmap_index = 0;
       else bitmap_index++;
       redraw = true;
     }
-
-    if (digitalRead(WIO_5S_RIGHT) == LOW) {
-      delay(100);
+*/
+    if (digitalRead(WIO_KEY_B) == LOW) {
+      delay(500);
+      if (digitalRead(WIO_KEY_B) == HIGH) return;
       get_bitmap_index(root, bitmap_index);
       filename = root.name();
+      filename=filename.substring(3);
       SD.remove(filename);
       bitmap_index = 0;  //TODO std::min((int)bitmap_index, num_bitmaps-2);
       root = SD.open("/");
@@ -277,14 +293,14 @@ public:
       redraw = true;
     }
 
-    if (digitalRead(WIO_5S_UP) == LOW) {
+    if (digitalRead(WIO_5S_RIGHT) == LOW) {
       delay(100);
       if (bitmap_index == num_bitmaps - 1) bitmap_index = 0;
       else bitmap_index++;
       redraw = true;
     }
 
-    if (digitalRead(WIO_5S_DOWN) == LOW) {
+    if (digitalRead(WIO_5S_LEFT) == LOW) {
       delay(100);
       if (bitmap_index == 0) bitmap_index = num_bitmaps - 1;
       else bitmap_index--;
@@ -294,9 +310,12 @@ public:
     if (redraw) {
       File f=get_bitmap_index(root, bitmap_index);
       filename = f.name();
-      display_image(filename.substring(3).c_str());
+      filename=filename.substring(3);
+      display.begin(TFT_BLACK);
+      draw_banner(filename.c_str());
+      display_image(filename.c_str());
       uint16_t width = strlen(filename.c_str()) * 6 + 10;
-      //draw_banner(filename.c_str());
+      
       //draw_button_bar("Menu", "Delete", "Last", "Next");
     }
   }
@@ -326,11 +345,10 @@ public:
   void display_image(const char* filename) {
     c_bmp_reader_stdio bitmap;
     uint16_t width, height;
-    Serial.println(bitmap.open(filename, width, height));
+    bitmap.open(filename, width, height);
 
     const uint16_t display_width = DISPLAY_WIDTH, display_height = DISPLAY_HEIGHT - BAR_HEIGHT;
     uint16_t tft_row_number = 0;
-    Serial.println(height);
 
     for (uint16_t y = 0; y < height; y++) {
       uint16_t line_rgb565[width];
@@ -347,20 +365,28 @@ public:
           pixel_number++;
         }
       }
-
-      uint32_t scaled_y = static_cast<uint32_t>(y) * display_height / height;
-      while (tft_row_number < scaled_y) {
-        writeHLine(0, tft_row_number, display_width, scaled_row);
-        tft_row_number++;
+      if (height>display_height) {
+        uint32_t scaled_y = static_cast<uint32_t>(y) * display_height / height;
+        while (tft_row_number < scaled_y) {
+          writeHLine(0, tft_row_number, display_width, scaled_row);
+          tft_row_number++;
+        }
+      } else {
+        writeHLine(0, tft_row_number++, display_width, scaled_row);
       }
     }
 
     bitmap.close();
   }
+
+  void draw_banner(const char* filename) {
+     display.drawString(filename, 10, DISPLAY_HEIGHT - BAR_HEIGHT + 2);
+  }
   void writeHLine(int16_t x, int16_t y, int16_t w, uint16_t* color) {
-    for (int i = 0; i < w; i++) {
+    display.pushImage(x, y, w, 1, color);
+   /* for (int i = 0; i < w; i++) {
       display.drawPixel(i + x, y, color[i]);
-    }
+    }*/
   }
 };
 
@@ -400,14 +426,12 @@ void loop() {
   bool image_in_progress = false;
   while (!sstv_decoder.decode_image_non_blocking(LOST_SIGNAL_TIMEOUT_SECONDS, ENABLE_SLANT_CORRECTION, image_in_progress)) {
     if (digitalRead(WIO_KEY_A) == LOW) {
-      while (digitalRead(WIO_KEY_A) == HIGH)
-        ;
+      while (digitalRead(WIO_KEY_A) == LOW);
       display.begin(TFT_BLACK);
       autosave = false;
       break;
     } else if (digitalRead(WIO_KEY_B) == LOW) {
-      while (digitalRead(WIO_KEY_B) == HIGH)
-        ;
+      while (digitalRead(WIO_KEY_B) == LOW);
 
       if (display_rotation == 1) display_rotation = 3;
       else display_rotation = 1;
@@ -417,8 +441,7 @@ void loop() {
       autosave = false;
       break;
     } else if (digitalRead(WIO_KEY_C) == LOW) {
-      while (digitalRead(WIO_KEY_C) == HIGH)
-        ;
+      while (digitalRead(WIO_KEY_C) == LOW);
       autosave = false;
       capture = false;
       break;
@@ -438,8 +461,16 @@ void loop() {
     slideshow.launch_slideshow();
     while (1) {
 
-      slideshow.update_slideshow();
-      delay(1000);
+      slideshow.update_slideshow(false);
+      delay(100);
+      //Pressing button C return to capture
+      if (digitalRead(WIO_KEY_C) == LOW) {
+        display.begin(TFT_BLACK);
+        while (digitalRead(WIO_KEY_C) == LOW);
+        capture=true;
+      
+        break;
+      }
     }
     sstv_decoder.open("temp");
     //capture=true;
@@ -463,6 +494,7 @@ void configure_display() {
 }
 
 void writeHLine(int16_t x, int16_t y, int16_t w, uint16_t* color) {
+ 
   for (int i = 0; i < w; i++) {
     display.drawPixel(i + x, y, color[i]);
   }
