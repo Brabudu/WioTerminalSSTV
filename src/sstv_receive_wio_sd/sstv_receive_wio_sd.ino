@@ -24,6 +24,10 @@
 
 #include "sstv_decoder.h"
 #include "ADCAudioWio.h"
+
+#include <sstv_encoder.h>
+#include "PWMAudioWio.h"
+
 #include "TFT_eSPI.h"
 
 #include <bmp_lib.h>
@@ -75,27 +79,154 @@ class c_bmp_writer_stdio : public c_bmp_writer {
 };
 
 class c_bmp_reader_stdio : public c_bmp_reader {
-
   File myFile;
 
+  // === BUFFER ===
+  static const uint16_t BUFFER_SIZE = 2048;
+  uint8_t buffer[BUFFER_SIZE];
+  uint32_t buffer_pos = 0;               // Posizione nel buffer
+  uint32_t buffer_len = 0;               // Dati validi nel buffer
+  uint32_t buffer_start_file_pos = 0;    // Offset nel file dove inizia il buffer
+
+  // === RIEMPIE IL BUFFER ===
+  void refill_buffer() {
+    if (!myFile) return;
+    myFile.seek(buffer_start_file_pos);
+    buffer_len = myFile.read(buffer, BUFFER_SIZE);
+    buffer_pos = 0;
+  }
+
+public:
   bool file_open(const char* filename) {
-    if (sd) myFile = SD.open(filename, FILE_READ);
-    return (myFile);
+    if (sd) {
+      myFile = SD.open(filename, FILE_READ);
+      if (myFile) {
+        buffer_start_file_pos = 0;
+        buffer_pos = 0;
+        buffer_len = 0;
+        refill_buffer();
+        return true;
+      }
+    }
+    return false;
   }
 
   void file_close() {
-    if (myFile) myFile.close();
+    if (myFile) {
+      myFile.close();
+      buffer_start_file_pos = 0;
+      buffer_pos = 0;
+      buffer_len = 0;
+    }
   }
 
   uint32_t file_read(void* data, uint32_t element_size, uint32_t num_elements) {
-    if (myFile) return myFile.read(data, element_size * num_elements);
+    uint32_t total_bytes = element_size * num_elements;
+    uint8_t* dst = static_cast<uint8_t*>(data);
+    uint32_t bytes_read = 0;
+
+    while (bytes_read < total_bytes) {
+      if (buffer_pos >= buffer_len) {
+        buffer_start_file_pos += buffer_len; // Avanza posizione file
+        refill_buffer();
+        if (buffer_len == 0) break; // EOF
+      }
+
+      uint32_t bytes_available = buffer_len - buffer_pos;
+      uint32_t bytes_to_copy = min(bytes_available, total_bytes - bytes_read);
+
+      memcpy(dst + bytes_read, buffer + buffer_pos, bytes_to_copy);
+      buffer_pos += bytes_to_copy;
+      bytes_read += bytes_to_copy;
+    }
+
+    return bytes_read / element_size; // oppure bytes_read, a seconda del tuo uso
   }
 
   void file_seek(uint32_t offset) {
-    if (myFile) myFile.seek(offset);
+    if (!myFile) return;
+
+    // Verifica se offset è dentro al buffer attuale
+    if (offset >= buffer_start_file_pos && offset < (buffer_start_file_pos + buffer_len)) {
+      buffer_pos = offset - buffer_start_file_pos; // Sposta solo il cursore nel buffer
+    } else {
+      // Altrimenti, nuova posizione e buffer invalidato
+      buffer_start_file_pos = offset;
+      buffer_pos = 0;
+      buffer_len = 0;
+    }
   }
 };
 
+
+//Derive a class from sstv encoder and override hardware specific functions
+const uint16_t audio_buffer_length = 4096u;
+class c_sstv_encoder_pwm : public c_sstv_encoder
+{
+
+  private :
+  uint16_t audio_buffer[2][audio_buffer_length];
+  uint16_t audio_buffer_index = 0;
+  uint8_t ping_pong = 0;
+  PWMAudioWio audio_output;
+  uint16_t sample_min, sample_max;
+
+  void draw_progress(uint16_t act, uint16_t total) {
+    float p=(float)act/total;
+    
+    for (int y=0;y<8;y++) {
+      display.drawFastHLine(150, DISPLAY_HEIGHT - BAR_HEIGHT+2+y, 150*p , TFT_RED);
+      display.drawFastHLine(150*(1+p), DISPLAY_HEIGHT - BAR_HEIGHT+2+y, 150*(1-p) , TFT_BLACK);
+    }
+  }
+
+  void output_sample(int16_t sample)
+  {
+    uint16_t scaled_sample = ((sample+32767)>>5);// + 1024;
+   
+    audio_buffer[ping_pong][audio_buffer_index++] = scaled_sample;
+    if(audio_buffer_index == audio_buffer_length)
+    {
+      audio_output.output_samples(audio_buffer[ping_pong], audio_buffer_length);
+      ping_pong ^= 1;
+      audio_buffer_index = 0;
+      //Serial.println(sample_min);
+      //Serial.println(sample_max);
+      sample_max = scaled_sample;
+      sample_min = scaled_sample;
+    }
+    else
+    {
+      sample_max = max(sample_max, scaled_sample);
+      sample_min = min(sample_min, scaled_sample);
+    }
+  }
+  
+  uint8_t get_image_pixel(uint16_t width, uint16_t height, uint16_t y, uint16_t x, uint8_t colour)
+  {
+         //b
+    return 0;
+  }
+  
+  
+  uint16_t row_number = 0;
+  uint16_t row[320];
+  uint16_t image_width, image_height;
+  
+  public:
+  void open()
+  { 
+    row_number=0;
+    audio_output.begin(0, 15000, 0);
+  }
+  void close()
+  { 
+    
+    audio_output.end();
+  }
+  c_sstv_encoder_pwm(double fs_Hz) : c_sstv_encoder(fs_Hz){}
+
+};
 
 
 //c_sstv_decoder provides a reusable SSTV decoder
@@ -234,15 +365,19 @@ public:
 
   void start() {
     adc_audio.begin(28, 15000);
+    Serial.println("begin");
     row_number = 0;
   }
   void stop() {
     adc_audio.end();
+    Serial.println("end");
   }
   c_sstv_decoder_io(float fs)
     : c_sstv_decoder{ fs } {
   }
 };
+
+
 
 class c_slideshow {
 
@@ -270,27 +405,46 @@ public:
 
     static const uint16_t timeouts[] = { 0, 1, 2, 5, 10, 30, 60, 60 * 2, 60 * 5 };
     uint16_t timeout_milliseconds = 1000 * timeouts[0];
-
-    /*
-    if (((millis() - last_update_time) > timeout_milliseconds) && (timeout_milliseconds != 0)) {
-      last_update_time = millis();
-      if (bitmap_index == num_bitmaps - 1) bitmap_index = 0;
-      else bitmap_index++;
-      redraw = true;
-    }
-*/
+   
     if (digitalRead(WIO_KEY_B) == LOW) {
-      delay(500);
-      if (digitalRead(WIO_KEY_B) == HIGH) return;
-      get_bitmap_index(root, bitmap_index);
-      filename = root.name();
+      draw_banner("Hold to delete!");
+      File f=get_bitmap_index(root, bitmap_index);
+      filename = f.name();
       filename=filename.substring(3);
+
+      delay(1000);
+      
+      if (digitalRead(WIO_KEY_B) == HIGH) {
+        draw_banner(filename.c_str());
+        return;
+      }
+      
       SD.remove(filename);
       bitmap_index = 0;  //TODO std::min((int)bitmap_index, num_bitmaps-2);
       root = SD.open("/");
       num_bitmaps--;
       if (num_bitmaps == 0) return;
       redraw = true;
+    }
+    if (digitalRead(WIO_KEY_A) == LOW) {
+      draw_banner("Hold to transmit!");
+      File f=get_bitmap_index(root, bitmap_index);
+      filename = f.name();
+      filename=filename.substring(3);
+
+      delay(1000);
+      
+      if (digitalRead(WIO_KEY_A) == HIGH) {
+        draw_banner(filename.c_str());
+        return;
+      }
+      draw_banner("TRANSMITTING");
+
+      c_sstv_encoder_pwm sstv_encoder(15000);
+      sstv_encoder.open();
+      sstv_encoder.generate_sstv(tx_martin_m2);
+      sstv_encoder.close();
+      draw_banner(filename.c_str());
     }
 
     if (digitalRead(WIO_5S_RIGHT) == LOW) {
@@ -361,7 +515,7 @@ public:
         uint16_t scaled_x = static_cast<uint32_t>(x) * display_width / width;
         while (pixel_number < scaled_x) {
           //display expects byteswapped data
-          scaled_row[pixel_number] = ((line_rgb565[x] & 0xff) << 8) | ((line_rgb565[x] & 0xff00) >> 8);
+          scaled_row[pixel_number] = line_rgb565[x];//((line_rgb565[x] & 0xff) << 8) | ((line_rgb565[x] & 0xff00) >> 8);
           pixel_number++;
         }
       }
@@ -383,10 +537,11 @@ public:
      display.drawString(filename, 10, DISPLAY_HEIGHT - BAR_HEIGHT + 2);
   }
   void writeHLine(int16_t x, int16_t y, int16_t w, uint16_t* color) {
-    display.pushImage(x, y, w, 1, color);
-   /* for (int i = 0; i < w; i++) {
+   // display.pushRect(x, y, w, 1, color);
+    
+   for (int i = 0; i < w; i++) {
       display.drawPixel(i + x, y, color[i]);
-    }*/
+    }
   }
 };
 
@@ -472,7 +627,6 @@ void loop() {
         break;
       }
     }
-    sstv_decoder.open("temp");
     //capture=true;
   }
 }
@@ -490,12 +644,6 @@ void configure_display() {
   display.begin();
   display.setRotation(3);
   digitalWrite(LCD_BACKLIGHT, HIGH);  // turn on the backlight
-  display.drawString("SSTV decoder ready.", 2, 2);
+  
 }
 
-void writeHLine(int16_t x, int16_t y, int16_t w, uint16_t* color) {
- 
-  for (int i = 0; i < w; i++) {
-    display.drawPixel(i + x, y, color[i]);
-  }
-}
